@@ -1,0 +1,199 @@
+---
+kind: DaemonSet
+apiVersion: extensions/v1beta1
+metadata:
+  name: glusterfs
+  labels:
+    glusterfs: daemonset
+  annotations:
+    description: GlusterFS DaemonSet
+    tags: glusterfs
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      name: glusterfs
+      labels:
+        glusterfs: pod
+        glusterfs-node: pod
+    spec:
+      nodeSelector:
+        storagenode: glusterfs
+      hostNetwork: true
+      containers:
+      - image: yassinemaachi/gluster-centos:1.0
+        imagePullPolicy: IfNotPresent
+        name: glusterfs
+        env:
+        - name: SYSTEMD_IGNORE_CHROOT
+          value: "1"
+        - name: container
+          value: "docker"
+        command:
+        - /usr/lib/systemd/systemd
+        - --system
+        volumeMounts:
+        - name: glusterfs-heketi
+          mountPath: "/var/lib/heketi"
+        - name: glusterfs-run
+          mountPath: "/run"
+        - name: glusterfs-lvm
+          mountPath: "/run/lvm"
+        - name: glusterfs-etc
+          mountPath: "/etc/glusterfs"
+        - name: glusterfs-logs
+          mountPath: "/var/log/glusterfs"
+        - name: glusterfs-config
+          mountPath: "/var/lib/glusterd"
+        - name: glusterfs-dev
+          mountPath: "/dev"
+        - name: glusterfs-misc
+          mountPath: "/var/lib/misc/glusterfsd"
+        - name: glusterfs-cgroup
+          mountPath: "/sys/fs/cgroup"
+          readOnly: true
+        - name: glusterfs-ssl
+          mountPath: "/etc/ssl"
+          readOnly: true
+        securityContext:
+          capabilities: {}
+          privileged: true
+        readinessProbe:
+          timeoutSeconds: 3
+          initialDelaySeconds: 40
+          tcpSocket:
+            port: 24007
+          periodSeconds: 25
+          successThreshold: 1
+          failureThreshold: 15
+        livenessProbe:
+          timeoutSeconds: 3
+          initialDelaySeconds: 40
+          tcpSocket:
+            port: 24007
+          periodSeconds: 25
+          successThreshold: 1
+          failureThreshold: 15
+      - image: cnero/gluster-centos:3.10.7
+        imagePullPolicy: IfNotPresent
+        name: glusterfs-snapshot-scheduler
+        command: ["/bin/sh"]
+        args: ["/opt/snaphot-scheduler/bin/entrypoint.sh"]
+        securityContext:
+          capabilities: {}
+          privileged: true
+        readinessProbe:
+          initialDelaySeconds: 40
+          timeoutSeconds: 15
+          exec:
+            command:
+            - /bin/bash
+            - /opt/snaphot-scheduler/bin/health.sh
+          periodSeconds: 25
+          successThreshold: 1
+          failureThreshold: 15
+        livenessProbe:
+          initialDelaySeconds: 40
+          timeoutSeconds: 15
+          exec:
+            command:
+            - /bin/bash
+            - /opt/snaphot-scheduler/bin/health.sh
+          periodSeconds: 25
+          successThreshold: 1
+          failureThreshold: 15
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", "[[ -e /run/glusterd.socket ]] || ln -s /tmp/run/glusterd.socket /run/glusterd.socket"]
+        volumeMounts:
+        - name: glusterfs-run
+          mountPath: "/tmp/run"
+        - name: glusterfs-snapshot-scheduler-run
+          mountPath: "/run"
+        - name: glusterfs-snapshot-scheduler-entrypoint
+          mountPath: /opt/snaphot-scheduler/bin
+      volumes:
+      - name: glusterfs-heketi
+        hostPath:
+          path: "/var/lib/heketi"
+      - name: glusterfs-run
+      - name: glusterfs-lvm
+        hostPath:
+          path: "/run/lvm"
+      - name: glusterfs-etc
+        hostPath:
+          path: "/etc/glusterfs"
+      - name: glusterfs-logs
+        hostPath:
+          path: "/var/log/glusterfs"
+      - name: glusterfs-config
+        hostPath:
+          path: "/var/lib/glusterd"
+      - name: glusterfs-dev
+        hostPath:
+          path: "/dev"
+      - name: glusterfs-misc
+        hostPath:
+          path: "/var/lib/misc/glusterfsd"
+      - name: glusterfs-cgroup
+        hostPath:
+          path: "/sys/fs/cgroup"
+      - name: glusterfs-ssl
+        hostPath:
+          path: "/etc/ssl"
+      - name: glusterfs-snapshot-scheduler-run
+      - name: glusterfs-snapshot-scheduler-entrypoint
+        configMap:
+          name: glusterfs-snapshot-scheduler-script
+          items:
+            - key: entrypoint
+              path: entrypoint.sh
+            - key: health
+              path: health.sh
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glusterfs-snapshot-scheduler-script
+data:
+  entrypoint: |-
+    #!/bin/sh
+    sleep 30
+    while
+      echo -n "Initializing snapshot_scheduler ... "
+      snap_scheduler.py init > /dev/null 2>&1
+      code=$?
+      [[ $code == 0 ]] \
+        && echo "ok" \
+        || echo "failed"
+      [[ $code == 3 || $code == 4 ]] \
+        && echo -n "Mounting glusterfs shared storage ... " \
+        && mkdir -p /run/gluster/shared_storage \
+        && mount.glusterfs $(hostname):/gluster_shared_storage /run/gluster/shared_storage > /dev/null 2>&1 \
+        && echo "ok"
+      [[ $code != 0 && $code != 3 && $code != 4 ]] && echo "Error code unknown: $code"
+      [[ $code == 0 ]] \
+        && echo -n "Enabling snapshot scheduling ... " \
+        && snap_scheduler.py enable > /dev/null 2>&1; code_enable=$? \
+        && [[ $code_enable == 0 || $code_enable == 8 ]] \
+        && echo "ok" \
+        && break \
+        || [[ $code == 0 ]] \
+        && echo "failed, exiting with error" \
+        && exit 1
+      sleep 5
+      [[ $code != 0 || $(gluster peer status > /dev/null 2>&1; echo $?) != 0 ]]
+    do :;  done
+    /usr/sbin/crond -n
+  health: |-
+    #!/bin/bash
+    gluster peer status > /dev/null \
+      && pgrep --pidfile /run/crond.pid > /dev/null 2>&1 \
+      && snap_scheduler.py status > /dev/null; code=$?; [[ $code == 0 || $code == 5 ]] \
+      || (! gluster volume list | grep gluster_shared_storage > /dev/null \
+      && ! pgrep --pidfile /run/crond.pid > /dev/null 2>&1)
+
