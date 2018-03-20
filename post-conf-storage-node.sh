@@ -1,6 +1,6 @@
 #!/bin/bash
 
-
+./edit-etc-hosts.sh
 
 sudo -i 	  
 
@@ -10,5 +10,3 @@ echo dm_thin_pool >> /etc/modules-load.d/modules.conf
 systemctl restart systemd-modules-load.service
  
 modprobe dm_thin_pool
-
-./edit-etc-hosts.sh
