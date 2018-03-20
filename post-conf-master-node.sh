@@ -7,6 +7,6 @@ chmod +x ./kubectl
 
 sudo -i
 
-sed "/registry.fedoraproject.org/c  - index.docker.ro \n" registries.conf
-
+sed "/ registry.fedoraproject.org/c index.docker.ro \n" /etc/containers/registries.conf
+systemctl restart docker
 
